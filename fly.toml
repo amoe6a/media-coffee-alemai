@@ -1,0 +1,35 @@
+# Fly.io configuration for the coffee-shop bot.
+# Edit `app` to a globally-unique name, then see DEPLOY.md for the full walkthrough.
+
+app = "media-coffee-alemai"    # your app → https://media-coffee-alemai.fly.dev
+primary_region = "fra"         # Frankfurt. Pick one near you: waw, cdg, bom, sin...
+
+[build]
+  # uses the Dockerfile in this folder
+
+[env]
+  PORT = "8080"
+  DB_PATH = "/app/data/coffee.db"   # lives on the persistent volume below
+  CURRENCY = "₸"                    # tenge; change if needed
+  # BOT_TOKEN and ADMIN_IDS are NOT here on purpose — set them as secrets:
+  #   flyctl secrets set BOT_TOKEN=... ADMIN_IDS=...
+  # WEBHOOK_URL is auto-derived from the app name (https://<app>.fly.dev).
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keep one machine always running so order notifications are instant
+  # (no cold-start delay when a customer places an order).
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[mounts]
+  source = "coffee_data"            # the volume you create with `flyctl volumes create`
+  destination = "/app/data"         # matches DB_PATH so SQLite survives restarts
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # 512MB is a safe default. 256MB also works but can run out of memory during
+  # photo-heavy Excel menu imports (Pillow); raise this if imports ever crash.
+  memory = "512mb"
