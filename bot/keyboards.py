@@ -52,45 +52,44 @@ def order_text(info: dict, currency: str) -> str:
 
 # ------------------------------------------------------------ customer ----
 
-def categories_kb() -> Kb:
-    return Kb([
-        [Btn("🥤 Напитки", callback_data="c|Drinks"),
-         Btn("🍽 Еда", callback_data="c|Food")],
-        [Btn("🧺 Моя корзина", callback_data="cart")],
-    ])
+def categories_kb(categories) -> Kb:
+    """categories: rows with id + name (from db.customer_categories)."""
+    rows = [[Btn(c["name"], callback_data=f"c|{c['id']}")] for c in categories]
+    rows.append([Btn("🧺 Моя корзина", callback_data="cart")])
+    return Kb(rows)
 
 
-def subcats_kb(category: str, subs: list[str]) -> Kb:
-    rows = [[Btn(s, callback_data=f"s|{category}|{s}")] for s in subs]
+def subcats_kb(cat_id: int, subs) -> Kb:
+    """subs: rows with id + name (from db.customer_subcategories)."""
+    rows = [[Btn(s["name"], callback_data=f"s|{s['id']}")] for s in subs]
     rows.append([Btn("⬅️ Назад", callback_data="b|cats"),
                  Btn("🧺 Корзина", callback_data="cart")])
     return Kb(rows)
 
 
-def items_kb(category: str, subcategory: str, items) -> Kb:
+def items_kb(cat_id: int, items) -> Kb:
     rows = []
     for it in items:
         sold_out = it["quantity"] <= 0
         label = f"{it['name']}" + (" — нет в наличии" if sold_out else "")
         rows.append([Btn(label, callback_data=f"i|{it['id']}")])
-    rows.append([Btn("⬅️ Назад", callback_data=f"b|c|{category}"),
+    rows.append([Btn("⬅️ Назад", callback_data=f"b|c|{cat_id}"),
                  Btn("🧺 Корзина", callback_data="cart")])
     return Kb(rows)
 
 
-def item_card_kb(item, qty: int) -> Kb:
+def item_card_kb(item, sub_id, qty: int) -> Kb:
     iid = item["id"]
+    back = Btn("⬅️ Назад", callback_data=f"b|s|{sub_id}")
     if item["quantity"] <= 0:
         return Kb([[Btn("😔 Нет в наличии", callback_data="noop")],
-                   [Btn("⬅️ Назад", callback_data=f"b|s|{item['category']}|{item['subcategory']}"),
-                    Btn("🧺 Корзина", callback_data="cart")]])
+                   [back, Btn("🧺 Корзина", callback_data="cart")]])
     return Kb([
         [Btn("➖", callback_data=f"q|{iid}|{qty}|-"),
          Btn(f"{qty}", callback_data="noop"),
          Btn("➕", callback_data=f"q|{iid}|{qty}|+")],
         [Btn(f"🛒 Добавить {qty} в корзину", callback_data=f"a|{iid}|{qty}")],
-        [Btn("⬅️ Назад", callback_data=f"b|s|{item['category']}|{item['subcategory']}"),
-         Btn("🧺 Корзина", callback_data="cart")],
+        [back, Btn("🧺 Корзина", callback_data="cart")],
     ])
 
 
@@ -143,8 +142,11 @@ def order_kb(status: str, order_id: int) -> Kb | None:
 
 def admin_panel_kb() -> Kb:
     return Kb([
-        [Btn("📊 Импорт меню из Excel", callback_data="ad|xl")],
+        [Btn("➕ Добавить товар", callback_data="ad|additem")],
         [Btn("🧾 Товары и остатки", callback_data="ad|items")],
+        [Btn("🗂 Категории", callback_data="ad|cats"),
+         Btn("🏷 Подкатегории", callback_data="ad|subs")],
+        [Btn("📊 Импорт меню из Excel", callback_data="ad|xl")],
         [Btn("🖼 Фото товаров", callback_data="ad|img")],
         [Btn("👥 Пользователи и роли", callback_data="ad|users")],
     ])
@@ -165,8 +167,10 @@ def admin_item_kb(item) -> Kb:
          Btn("−1", callback_data=f"ad|st|{iid}|-1"),
          Btn("＋1", callback_data=f"ad|st|{iid}|1"),
          Btn("＋10", callback_data=f"ad|st|{iid}|10")],
-        [Btn("✏️ Задать точный остаток", callback_data=f"ad|set|{iid}"),
-         Btn("🖼 Задать фото", callback_data=f"ad|imgfor|{iid}")],
+        [Btn("✏️ Точный остаток", callback_data=f"ad|set|{iid}"),
+         Btn("🖼 Фото", callback_data=f"ad|imgfor|{iid}")],
+        [Btn("✏️ Название", callback_data=f"ad|ename|{iid}"),
+         Btn("💵 Цена", callback_data=f"ad|eprice|{iid}")],
         [Btn("🙈 Скрыть из меню" if item["available"] else "👀 Показать в меню",
              callback_data=f"ad|av|{iid}"),
          Btn("🗑 Удалить", callback_data=f"ad|del|{iid}")],
@@ -185,3 +189,50 @@ def admin_img_pick_kb(items) -> Kb:
             for it in items]
     rows.append([Btn("⬅️ Панель администратора", callback_data="ad|panel")])
     return Kb(rows)
+
+
+# -- categories / subcategories management --
+
+def admin_categories_kb(categories) -> Kb:
+    rows = [[Btn("➕ Добавить категорию", callback_data="ad|catadd")]]
+    for c in categories:
+        rows.append([Btn(f"🗑 {c['name']}", callback_data=f"ad|catdel|{c['id']}")])
+    rows.append([Btn("⬅️ Панель администратора", callback_data="ad|panel")])
+    return Kb(rows)
+
+
+def admin_confirm_delete_cat_kb(cat_id: int) -> Kb:
+    return Kb([[Btn("🗑 Да, удалить", callback_data=f"ad|catdel2|{cat_id}"),
+                Btn("↩️ Нет", callback_data="ad|cats")]])
+
+
+def admin_subcats_kb(subs) -> Kb:
+    rows = [[Btn("➕ Добавить подкатегорию", callback_data="ad|subadd")]]
+    for s in subs:
+        rows.append([Btn(f"🗑 {s['category']} · {s['name']}",
+                         callback_data=f"ad|subdel|{s['id']}")])
+    rows.append([Btn("⬅️ Панель администратора", callback_data="ad|panel")])
+    return Kb(rows)
+
+
+def admin_confirm_delete_sub_kb(sub_id: int) -> Kb:
+    return Kb([[Btn("🗑 Да, удалить", callback_data=f"ad|subdel2|{sub_id}"),
+                Btn("↩️ Нет", callback_data="ad|subs")]])
+
+
+def pick_category_kb(categories, prefix: str, back: str) -> Kb:
+    """A category chooser. Each button is '<prefix>|<cat_id>'."""
+    rows = [[Btn(c["name"], callback_data=f"{prefix}|{c['id']}")] for c in categories]
+    rows.append([Btn("⬅️ Назад", callback_data=back)])
+    return Kb(rows)
+
+
+def pick_subcategory_kb(subs, prefix: str, back: str) -> Kb:
+    """A subcategory chooser. Each button is '<prefix>|<sub_id>'."""
+    rows = [[Btn(s["name"], callback_data=f"{prefix}|{s['id']}")] for s in subs]
+    rows.append([Btn("⬅️ Назад", callback_data=back)])
+    return Kb(rows)
+
+
+def skip_photo_kb() -> Kb:
+    return Kb([[Btn("⏭ Пропустить (без фото)", callback_data="ad|niskip")]])

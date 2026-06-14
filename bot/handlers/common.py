@@ -5,12 +5,14 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from .. import database as db
-from ..keyboards import categories_kb
+from .. import keyboards as kb
 
 log = logging.getLogger(__name__)
 
 STATE_KEYS = ("await_phone", "await_kaspi", "await_address", "reject_order",
-              "await_stock", "await_img")
+              "await_stock", "await_img", "await_cat", "await_sub",
+              "await_item_name", "await_item_price", "await_item_photo",
+              "await_ename", "await_eprice", "new_item")
 
 
 def ensure_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,7 +38,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Здравствуйте, {user['name']}! Добро пожаловать в нашу кофейню ☕\n"
         "Смотрите меню, наполняйте корзину — и мы доставим заказ к вашей двери."
         + extra,
-        reply_markup=categories_kb(),
+        reply_markup=kb.categories_kb(db.customer_categories()),
         parse_mode="Markdown",
     )
 
@@ -79,7 +81,12 @@ async def menu_root_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Inline 'Menu' button -> show categories."""
     q = update.callback_query
     await q.answer()
-    await q.message.reply_text("Что желаете?", reply_markup=categories_kb())
+    cats = db.customer_categories()
+    if not cats:
+        await q.message.reply_text("Меню пока пусто — загляните чуть позже ☕")
+        return
+    await q.message.reply_text("Что желаете?",
+                               reply_markup=kb.categories_kb(cats))
 
 
 async def noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -93,7 +100,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ensure_user(update, context)
     if await barista.maybe_reject_reason(update, context):
         return
-    if await admin.maybe_set_stock(update, context):
+    if await admin.maybe_admin_text(update, context):
         return
     if await customer.maybe_checkout_text(update, context):
         return

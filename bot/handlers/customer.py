@@ -39,7 +39,8 @@ def _card_caption(item, currency: str) -> str:
 
 async def _send_item_card(message, item, qty: int, currency: str):
     caption = _card_caption(item, currency)
-    markup = kb.item_card_kb(item, qty)
+    sub_id = db.get_subcategory_id(item["category"], item["subcategory"]) or 0
+    markup = kb.item_card_kb(item, sub_id, qty)
     if item["image_file_id"]:
         await message.reply_photo(item["image_file_id"], caption=caption,
                                   reply_markup=markup, parse_mode="Markdown")
@@ -52,8 +53,12 @@ async def _send_item_card(message, item, qty: int, currency: str):
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ensure_user(update, context)
+    cats = db.customer_categories()
+    if not cats:
+        await update.message.reply_text("Меню пока пусто — загляните чуть позже ☕")
+        return
     await update.message.reply_text("Что желаете?",
-                                    reply_markup=kb.categories_kb())
+                                    reply_markup=kb.categories_kb(cats))
 
 
 async def cart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -75,8 +80,43 @@ async def myorders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # ------------------------------------------------------------ browsing ----
 
+async def _show_subcats(message, cat_id: int, currency, edit: bool):
+    cat = db.get_category(cat_id)
+    if not cat:
+        return False
+    subs = db.customer_subcategories(cat["name"])
+    if not subs:
+        return False
+    text = f"*{cat['name']}* — выберите раздел:"
+    markup = kb.subcats_kb(cat_id, subs)
+    if edit:
+        await message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        await message.chat.send_message(text, reply_markup=markup,
+                                        parse_mode="Markdown")
+    return True
+
+
+async def _show_items(message, sub_id: int, edit: bool):
+    sub = db.get_subcategory(sub_id)
+    if not sub:
+        return False
+    cat_id = db.get_category_id_by_name(sub["category"]) or 0
+    items = db.items_in(sub["category"], sub["name"], only_available=True)
+    if not items:
+        return False
+    text = f"*{sub['category']} · {sub['name']}*"
+    markup = kb.items_kb(cat_id, items)
+    if edit:
+        await message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        await message.chat.send_message(text, reply_markup=markup,
+                                        parse_mode="Markdown")
+    return True
+
+
 async def browse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Callback prefixes: c| s| i| q| a| b|"""
+    """Callback prefixes (all ID-based): c| s| i| q| a| b|"""
     q = update.callback_query
     ensure_user(update, context)
     currency = context.bot_data["cfg"].currency
@@ -84,26 +124,14 @@ async def browse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     kind = parts[0]
 
     if kind == "c":                                   # category -> subcats
-        category = parts[1]
-        subs = db.subcategories(category, only_available=True)
-        if not subs:
-            await q.answer("Здесь пока пусто 😕", show_alert=True)
-            return
         await q.answer()
-        await q.edit_message_text(f"*{category}* — выберите раздел:",
-                                  reply_markup=kb.subcats_kb(category, subs),
-                                  parse_mode="Markdown")
+        if not await _show_subcats(q.message, int(parts[1]), currency, edit=True):
+            await q.answer("Здесь пока пусто 😕", show_alert=True)
 
     elif kind == "s":                                 # subcat -> item list
-        category, sub = parts[1], parts[2]
-        items = db.items_in(category, sub, only_available=True)
-        if not items:
-            await q.answer("Здесь пока пусто 😕", show_alert=True)
-            return
         await q.answer()
-        await q.edit_message_text(f"*{category} · {sub}*",
-                                  reply_markup=kb.items_kb(category, sub, items),
-                                  parse_mode="Markdown")
+        if not await _show_items(q.message, int(parts[1]), edit=True):
+            await q.answer("Здесь пока пусто 😕", show_alert=True)
 
     elif kind == "i":                                 # item -> photo card
         item = db.get_item(int(parts[1]))
@@ -120,9 +148,10 @@ async def browse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         qty = int(parts[2]) + (1 if parts[3] == "+" else -1)
         qty = max(1, min(qty, MAX_PER_LINE, max(item["quantity"], 1)))
+        sub_id = db.get_subcategory_id(item["category"], item["subcategory"]) or 0
         await q.answer()
         try:
-            await q.edit_message_reply_markup(kb.item_card_kb(item, qty))
+            await q.edit_message_reply_markup(kb.item_card_kb(item, sub_id, qty))
         except Exception:                             # noqa: BLE001  (not modified)
             pass
 
@@ -134,9 +163,10 @@ async def browse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         cart = _cart(context)
         cart[item["id"]] = min(cart.get(item["id"], 0) + qty, MAX_PER_LINE)
+        sub_id = db.get_subcategory_id(item["category"], item["subcategory"]) or 0
         await q.answer(f"Добавлено {qty} × {item['name']} 🛒")
         try:
-            await q.edit_message_reply_markup(kb.item_card_kb(item, 1))
+            await q.edit_message_reply_markup(kb.item_card_kb(item, sub_id, 1))
         except Exception:                             # noqa: BLE001
             pass
 
@@ -144,25 +174,17 @@ async def browse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer()
         target = parts[1]
         if target == "cats":
+            cats = db.customer_categories()
             await q.edit_message_text("Что желаете?",
-                                      reply_markup=kb.categories_kb())
+                                      reply_markup=kb.categories_kb(cats))
         elif target == "c":
-            category = parts[2]
-            subs = db.subcategories(category, only_available=True)
-            await q.edit_message_text(f"*{category}* — выберите раздел:",
-                                      reply_markup=kb.subcats_kb(category, subs),
-                                      parse_mode="Markdown")
+            await _show_subcats(q.message, int(parts[2]), currency, edit=True)
         elif target == "s":                           # from a photo card
-            category, sub = parts[2], parts[3]
-            items = db.items_in(category, sub, only_available=True)
             try:
                 await q.message.delete()
             except Exception:                         # noqa: BLE001
                 pass
-            await q.message.chat.send_message(
-                f"*{category} · {sub}*",
-                reply_markup=kb.items_kb(category, sub, items),
-                parse_mode="Markdown")
+            await _show_items(q.message, int(parts[2]), edit=False)
 
 
 # ----------------------------------------------------------------- cart ----

@@ -63,13 +63,16 @@ def parse_menu_xlsx(data: bytes) -> ParsedMenu:
                                            "price", "quantity")]
         if not any(others):
             continue                                  # note row — ignore
-        category = CATEGORY_ALIASES.get(_norm(cell("category")).lower())
+        category = _norm(cell("category"))
+        if category.lower() in CATEGORY_ALIASES:
+            category = CATEGORY_ALIASES[category.lower()]
+        category = " ".join(category.split())[:50]
         if not category:
             result.errors.append(
-                f"Строка {row_no} («{name}»): категория должна быть Drinks или Food — пропущено."
+                f"Строка {row_no} («{name}»): категория не заполнена — пропущено."
             )
             continue
-        subcategory = _norm(cell("subcategory")).title()
+        subcategory = " ".join(_norm(cell("subcategory")).split())[:50]
         if not subcategory:
             result.errors.append(
                 f"Строка {row_no} («{name}»): подкатегория не заполнена — пропущено."

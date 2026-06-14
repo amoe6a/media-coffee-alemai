@@ -14,7 +14,7 @@ ST_ACCEPTED = "accepted"
 ST_REJECTED = "rejected"
 ST_COMPLETED = "completed"
 
-CATEGORIES = ("Drinks", "Food")
+CATEGORIES = ("Drinks", "Food")   # only used to seed brand-new databases
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
@@ -26,6 +26,16 @@ CREATE TABLE IF NOT EXISTS users(
     kaspi      TEXT,
     address    TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS categories(
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE
+);
+CREATE TABLE IF NOT EXISTS subcategories(
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL COLLATE NOCASE,
+    name     TEXT NOT NULL COLLATE NOCASE,
+    UNIQUE(category, name)
 );
 CREATE TABLE IF NOT EXISTS menu_items(
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,10 +75,16 @@ CREATE TABLE IF NOT EXISTS order_msgs(
 """
 
 
+def _pylower(s):
+    """Unicode-aware lowercase (SQLite's NOCASE only folds ASCII)."""
+    return s.casefold() if isinstance(s, str) else s
+
+
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(_DB_PATH, timeout=10)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys = ON")
+    c.create_function("pylower", 1, _pylower, deterministic=True)
     return c
 
 
@@ -91,6 +107,12 @@ def init_db(path: str) -> None:
         # migrations for databases created before a column existed
         _ensure_column(c, "users", "kaspi", "TEXT")
         _ensure_column(c, "orders", "kaspi", "TEXT")
+        # backfill the category/subcategory tables from any existing items so
+        # whatever is already on the menu becomes manageable in the admin UI
+        c.execute("INSERT OR IGNORE INTO categories(name) "
+                  "SELECT DISTINCT category FROM menu_items")
+        c.execute("INSERT OR IGNORE INTO subcategories(category, name) "
+                  "SELECT DISTINCT category, subcategory FROM menu_items")
 
 
 # ---------------------------------------------------------------- users ----
@@ -154,8 +176,148 @@ def staff_ids(env_admin_ids: list[int]) -> list[int]:
 
 # ----------------------------------------------------------------- menu ----
 
+def clean_name(raw: str, limit: int = 60) -> str:
+    """Trim, collapse inner whitespace, and cap length for any menu name."""
+    return " ".join((raw or "").split())[:limit].strip()
+
+
+# -- categories -------------------------------------------------------------
+
+def ensure_category(name: str) -> None:
+    with _conn() as c:
+        c.execute("INSERT OR IGNORE INTO categories(name) VALUES(?)", (name,))
+
+
+def add_category(name: str) -> tuple[bool, str]:
+    name = clean_name(name, 50)
+    if not name:
+        return False, "empty"
+    with _conn() as c:
+        exists = c.execute("SELECT 1 FROM categories WHERE pylower(name)=pylower(?)",
+                           (name,)).fetchone()
+        if exists:
+            return False, "exists"
+        c.execute("INSERT INTO categories(name) VALUES(?)", (name,))
+    return True, name
+
+
+def list_categories() -> list[sqlite3.Row]:
+    with _conn() as c:
+        return c.execute("SELECT * FROM categories ORDER BY id").fetchall()
+
+
+def get_category(cat_id: int) -> sqlite3.Row | None:
+    with _conn() as c:
+        return c.execute("SELECT * FROM categories WHERE id=?", (cat_id,)).fetchone()
+
+
+def get_category_id_by_name(name: str) -> int | None:
+    with _conn() as c:
+        row = c.execute("SELECT id FROM categories WHERE pylower(name)=pylower(?)",
+                        (name,)).fetchone()
+        return row["id"] if row else None
+
+
+def category_delete_counts(cat_id: int) -> tuple[str, int, int] | None:
+    """(name, items that would be removed, subcategories removed)."""
+    with _conn() as c:
+        cat = c.execute("SELECT name FROM categories WHERE id=?", (cat_id,)).fetchone()
+        if not cat:
+            return None
+        name = cat["name"]
+        n_items = c.execute("SELECT COUNT(*) n FROM menu_items WHERE category=? "
+                            "COLLATE NOCASE", (name,)).fetchone()["n"]
+        n_subs = c.execute("SELECT COUNT(*) n FROM subcategories WHERE category=? "
+                           "COLLATE NOCASE", (name,)).fetchone()["n"]
+        return name, n_items, n_subs
+
+
+def delete_category(cat_id: int) -> None:
+    """Remove a category together with its subcategories and items."""
+    with _conn() as c:
+        cat = c.execute("SELECT name FROM categories WHERE id=?", (cat_id,)).fetchone()
+        if not cat:
+            return
+        name = cat["name"]
+        c.execute("DELETE FROM menu_items WHERE category=? COLLATE NOCASE", (name,))
+        c.execute("DELETE FROM subcategories WHERE category=? COLLATE NOCASE", (name,))
+        c.execute("DELETE FROM categories WHERE id=?", (cat_id,))
+
+
+# -- subcategories ----------------------------------------------------------
+
+def ensure_subcategory(category: str, name: str) -> None:
+    with _conn() as c:
+        c.execute("INSERT OR IGNORE INTO subcategories(category, name) VALUES(?,?)",
+                  (category, name))
+
+
+def add_subcategory(category: str, name: str) -> tuple[bool, str]:
+    name = clean_name(name, 50)
+    if not name:
+        return False, "empty"
+    with _conn() as c:
+        exists = c.execute(
+            "SELECT 1 FROM subcategories WHERE pylower(category)=pylower(?) "
+            "AND pylower(name)=pylower(?)", (category, name)).fetchone()
+        if exists:
+            return False, "exists"
+        c.execute("INSERT INTO subcategories(category, name) VALUES(?,?)",
+                  (category, name))
+    return True, name
+
+
+def list_subcategories(category: str | None = None) -> list[sqlite3.Row]:
+    with _conn() as c:
+        if category is None:
+            return c.execute("SELECT * FROM subcategories ORDER BY category, id"
+                             ).fetchall()
+        return c.execute("SELECT * FROM subcategories WHERE category=? COLLATE NOCASE "
+                         "ORDER BY id", (category,)).fetchall()
+
+
+def get_subcategory(sub_id: int) -> sqlite3.Row | None:
+    with _conn() as c:
+        return c.execute("SELECT * FROM subcategories WHERE id=?", (sub_id,)).fetchone()
+
+
+def get_subcategory_id(category: str, name: str) -> int | None:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id FROM subcategories WHERE pylower(category)=pylower(?) "
+            "AND pylower(name)=pylower(?)", (category, name)).fetchone()
+        return row["id"] if row else None
+
+
+def subcategory_delete_counts(sub_id: int) -> tuple[str, str, int] | None:
+    """(category, name, items that would be removed)."""
+    with _conn() as c:
+        sub = c.execute("SELECT * FROM subcategories WHERE id=?", (sub_id,)).fetchone()
+        if not sub:
+            return None
+        n_items = c.execute(
+            "SELECT COUNT(*) n FROM menu_items WHERE category=? COLLATE NOCASE "
+            "AND subcategory=? COLLATE NOCASE",
+            (sub["category"], sub["name"])).fetchone()["n"]
+        return sub["category"], sub["name"], n_items
+
+
+def delete_subcategory(sub_id: int) -> None:
+    with _conn() as c:
+        sub = c.execute("SELECT * FROM subcategories WHERE id=?", (sub_id,)).fetchone()
+        if not sub:
+            return
+        c.execute("DELETE FROM menu_items WHERE category=? COLLATE NOCASE "
+                  "AND subcategory=? COLLATE NOCASE", (sub["category"], sub["name"]))
+        c.execute("DELETE FROM subcategories WHERE id=?", (sub_id,))
+
+
+# -- items ------------------------------------------------------------------
+
 def upsert_item(name: str, category: str, subcategory: str,
                 price: float | None, quantity: int) -> str:
+    ensure_category(category)
+    ensure_subcategory(category, subcategory)
     with _conn() as c:
         row = c.execute(
             "SELECT id FROM menu_items WHERE name=? COLLATE NOCASE", (name,)
@@ -185,8 +347,63 @@ def get_item(item_id: int) -> sqlite3.Row | None:
 def get_item_by_name(name: str) -> sqlite3.Row | None:
     with _conn() as c:
         return c.execute(
-            "SELECT * FROM menu_items WHERE name=? COLLATE NOCASE", (name,)
+            "SELECT * FROM menu_items WHERE pylower(name)=pylower(?)", (name,)
         ).fetchone()
+
+
+def create_menu_item(category: str, subcategory: str, name: str,
+                     price: float | None) -> tuple[int | None, str]:
+    """Manual add: create a new item at stock 0. Fails if the name exists."""
+    name = clean_name(name, 60)
+    if not name:
+        return None, "empty"
+    ensure_category(category)
+    ensure_subcategory(category, subcategory)
+    with _conn() as c:
+        if c.execute("SELECT 1 FROM menu_items WHERE pylower(name)=pylower(?)",
+                     (name,)).fetchone():
+            return None, "exists"
+        cur = c.execute(
+            "INSERT INTO menu_items(name, category, subcategory, price, quantity) "
+            "VALUES(?,?,?,?,0)", (name, category, subcategory, price))
+        return cur.lastrowid, "created"
+
+
+def rename_item(item_id: int, new_name: str) -> tuple[bool, str]:
+    new_name = clean_name(new_name, 60)
+    if not new_name:
+        return False, "empty"
+    with _conn() as c:
+        clash = c.execute("SELECT id FROM menu_items WHERE pylower(name)=pylower(?) "
+                          "AND id<>?", (new_name, item_id)).fetchone()
+        if clash:
+            return False, "exists"
+        c.execute("UPDATE menu_items SET name=? WHERE id=?", (new_name, item_id))
+    return True, new_name
+
+
+def set_price(item_id: int, price: float | None) -> None:
+    with _conn() as c:
+        c.execute("UPDATE menu_items SET price=? WHERE id=?", (price, item_id))
+
+
+def customer_categories() -> list[sqlite3.Row]:
+    """Categories that currently have at least one visible item."""
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM categories c WHERE EXISTS("
+            "  SELECT 1 FROM menu_items m WHERE m.category=c.name COLLATE NOCASE "
+            "  AND m.available=1) ORDER BY c.id").fetchall()
+
+
+def customer_subcategories(category: str) -> list[sqlite3.Row]:
+    """Subcategories under a category that have at least one visible item."""
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM subcategories s WHERE s.category=? COLLATE NOCASE AND EXISTS("
+            "  SELECT 1 FROM menu_items m WHERE m.category=s.category COLLATE NOCASE "
+            "  AND m.subcategory=s.name COLLATE NOCASE AND m.available=1) "
+            "ORDER BY s.id", (category,)).fetchall()
 
 
 def subcategories(category: str, only_available: bool = False) -> list[str]:
